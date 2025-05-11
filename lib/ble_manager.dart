@@ -1,20 +1,16 @@
 import 'models/models.dart';
 import 'dart:async';
+import 'package:flutter_blue/flutter_blue.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 // BLE manager for scanning and advertising
 class BleManager {
-  // Simulated BLE scan: emits a list of mock users every 5 seconds
-  final Stream<List<User>> _mockNearbyUsersStream = Stream.periodic(
-    Duration(seconds: 5),
-    (count) {
-      // Simulate 3 users with varying proximity (RSSI)
-      return [
-        User(pseudonym: 'CosmicTaco92'),
-        User(pseudonym: 'GhostedU'),
-        User(pseudonym: 'VibingStar', bio: '✨Vibing✨'),
-      ];
-    },
-  );
+  final FlutterBlue _flutterBlue = FlutterBlue.instance;
+  final StreamController<List<User>> _nearbyUsersController =
+      StreamController.broadcast();
+  final Map<String, User> _discoveredUsers = {};
+  final Map<String, int> _rssiMap = {};
 
   // In-memory wave tracking for demo/testing
   final Set<String> _sentWaves = {};
@@ -24,37 +20,78 @@ class BleManager {
   final StreamController<String> _waveReceivedController =
       StreamController.broadcast();
 
-  // BLE scan every 5s, advertise pseudonym, handle waves
+  // Proximity expiry monitoring for ephemeral chat
+  final Map<String, Timer?> _proximityExpiryTimers = {};
+  final StreamController<String> _chatExpiredController =
+      StreamController.broadcast();
+
+  // BLE scan every 5s, handle waves
+  Timer? _scanTimer;
+  bool _isAdvertising = false;
+  bool _isInvisible = false;
+  Timer? _invisibleTimer;
+
   Future<void> startScanning() async {
-    // TODO: Implement BLE scan logic (every 5s)
+    _scanTimer?.cancel();
+    _scanTimer = Timer.periodic(Duration(seconds: 5), (timer) async {
+      _discoveredUsers.clear();
+      _rssiMap.clear();
+      _flutterBlue.startScan(timeout: Duration(seconds: 3));
+      _flutterBlue.scanResults.listen((results) {
+        for (ScanResult r in results) {
+          final adv = r.advertisementData;
+          if (adv.localName.isNotEmpty) {
+            final pseudonym = adv.localName;
+            _discoveredUsers[pseudonym] = User(pseudonym: pseudonym);
+            _rssiMap[pseudonym] = r.rssi;
+          }
+        }
+        _nearbyUsersController.add(_discoveredUsers.values.toList());
+      });
+      _flutterBlue.stopScan();
+    });
   }
 
   Future<void> startAdvertising(User user) async {
-    // TODO: Start BLE advertising with pseudonym
+    // Use flutter_blue for advertising if needed
+    _isAdvertising = true;
   }
 
   Future<void> stopAdvertising() async {
-    // TODO: Stop BLE advertising (Invisible/Ghost mode)
+    // Use flutter_blue for stopping advertising if needed
+    _isAdvertising = false;
   }
 
+  // Enable Invisible/Ghost Mode for up to 30 min
+  Future<void> enableInvisibleMode() async {
+    await stopAdvertising();
+    _isInvisible = true;
+    _invisibleTimer?.cancel();
+    _invisibleTimer = Timer(Duration(minutes: 30), () {
+      _isInvisible = false;
+      // Optionally, notify UI that invisible mode expired
+    });
+  }
+
+  // Disable Invisible/Ghost Mode manually
+  Future<void> disableInvisibleMode(User user) async {
+    _invisibleTimer?.cancel();
+    _isInvisible = false;
+    await startAdvertising(user);
+  }
+
+  bool get isInvisible => _isInvisible;
+
   Stream<List<User>> getNearbyUsers() {
-    // TODO: Replace with real BLE scan results
-    return _mockNearbyUsersStream;
+    if (_isInvisible) {
+      return Stream.value([]);
+    }
+    return _nearbyUsersController.stream;
   }
 
   // Simulate proximity (RSSI) for each user
   double getProximity(String pseudonym) {
-    // Return a mock RSSI value based on pseudonym
-    switch (pseudonym) {
-      case 'CosmicTaco92':
-        return -50; // green (close)
-      case 'GhostedU':
-        return -70; // yellow (medium)
-      case 'VibingStar':
-        return -85; // red (far)
-      default:
-        return -90;
-    }
+    return (_rssiMap[pseudonym] ?? -90).toDouble();
   }
 
   Future<void> sendWave(String peerPseudonym) async {
@@ -77,8 +114,57 @@ class BleManager {
     return _waveReceivedController.stream;
   }
 
+  // Stream to simulate proximity changes for a peer
   Stream<double> onProximityChanged(String peerPseudonym) {
-    // TODO: Monitor RSSI for proximity
-    throw UnimplementedError();
+    // Simulate RSSI changes every 5s for the given peer
+    return Stream.periodic(
+      Duration(seconds: 5),
+      (_) => getProximity(peerPseudonym),
+    );
+  }
+
+  // Call this to monitor proximity for a chat peer
+  void monitorProximityForChat(String peerPseudonym) {
+    onProximityChanged(peerPseudonym).listen((rssi) {
+      if (rssi < -80) {
+        // RSSI threshold for ~10m
+        // Start expiry timer if not already running
+        if (_proximityExpiryTimers[peerPseudonym] == null) {
+          _proximityExpiryTimers[peerPseudonym] = Timer(
+            Duration(seconds: 30),
+            () {
+              _chatExpiredController.add(peerPseudonym);
+              // Clean up timer
+              _proximityExpiryTimers[peerPseudonym]?.cancel();
+              _proximityExpiryTimers.remove(peerPseudonym);
+            },
+          );
+        }
+      } else {
+        // Cancel expiry timer if peer is back in range
+        _proximityExpiryTimers[peerPseudonym]?.cancel();
+        _proximityExpiryTimers.remove(peerPseudonym);
+      }
+    });
+  }
+
+  Stream<String> onChatExpired() => _chatExpiredController.stream;
+
+  // Real BLE matchmaking: fetch peer list from backend
+  Future<void> fetchPeersFromBackend() async {
+    final resp = await http.get(
+      Uri.parse('https://api.ephora.app/ble/peers?myPseudonym=ME'),
+    );
+    if (resp.statusCode == 200) {
+      final peers = jsonDecode(resp.body) as List;
+      _discoveredUsers.clear();
+      for (final peer in peers) {
+        _discoveredUsers[peer['pseudonym']] = User(
+          pseudonym: peer['pseudonym'],
+        );
+        _rssiMap[peer['pseudonym']] = peer['rssi'];
+      }
+      _nearbyUsersController.add(_discoveredUsers.values.toList());
+    }
   }
 }

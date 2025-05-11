@@ -6,7 +6,7 @@ class User {
   final String? pin;
   // TODO: Add pronouns, mood badges, etc.
 
-  User({required this.pseudonym, this.avatarUrl, this.bio, this.pin});
+  User({required this.pseudonym, this.bio, this.avatarUrl, this.pin});
 }
 
 // ChatSession model: sessionId, participants, isActive, etc.
@@ -48,7 +48,8 @@ class AdBanner {
   final String id;
   final String imageUrl;
   final String clickUrl;
-  // TODO: Add impression/click tracking fields.
-
+  int impressions = 0;
+  int clicks = 0;
+  // Impression/click tracking fields added
   AdBanner({required this.id, required this.imageUrl, required this.clickUrl});
 }

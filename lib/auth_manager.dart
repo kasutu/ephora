@@ -1,46 +1,87 @@
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'models/models.dart';
 
 // Auth manager for signup, login, and PIN
 class AuthManager {
-  // In-memory user store for demo/testing (replace with backend integration)
-  static final Set<String> _registeredPseudonyms = {};
-  static final Map<String, String> _userPasswords = {};
-  static final Map<String, String?> _userPins = {};
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
 
-  // Sign up, login, PIN, and session management
+  // Replace in-memory pseudonym check with backend call
+  Future<bool> isPseudonymTaken(String pseudonym) async {
+    final resp = await http.get(
+      Uri.parse(
+        'https://api.ephora.app/auth/check_pseudonym?pseudonym=$pseudonym',
+      ),
+    );
+    if (resp.statusCode == 200) {
+      return resp.body == 'true';
+    }
+    throw Exception('Network error');
+  }
+
+  // Replace signUp with backend call
   Future<User> signUp(String pseudonym, String password, {String? pin}) async {
-    // Simulate network delay
-    await Future.delayed(Duration(milliseconds: 300));
-    if (_registeredPseudonyms.contains(pseudonym)) {
-      throw Exception('Pseudonym already taken');
+    if (await isPseudonymTaken(pseudonym)) {
+      throw Exception('Pseudonym is already taken');
     }
-    _registeredPseudonyms.add(pseudonym);
-    _userPasswords[pseudonym] = password;
-    _userPins[pseudonym] = pin;
-    return User(pseudonym: pseudonym, pin: pin);
+    final resp = await http.post(
+      Uri.parse('https://api.ephora.app/auth/signup'),
+      body: {
+        'pseudonym': pseudonym,
+        'password': password,
+        if (pin != null) 'pin': pin,
+      },
+    );
+    if (resp.statusCode == 201) {
+      if (pin != null) await setPin(pin);
+      return User(pseudonym: pseudonym, pin: pin);
+    }
+    throw Exception('Signup failed: ${resp.body}');
   }
 
+  // Replace login with backend call
   Future<User> login(String pseudonym, String password, {String? pin}) async {
-    await Future.delayed(Duration(milliseconds: 200));
-    if (!_registeredPseudonyms.contains(pseudonym)) {
-      throw Exception('Pseudonym not found');
+    final resp = await http.post(
+      Uri.parse('https://api.ephora.app/auth/login'),
+      body: {
+        'pseudonym': pseudonym,
+        'password': password,
+        if (pin != null) 'pin': pin,
+      },
+    );
+    if (resp.statusCode == 200) {
+      if (pin != null) await setPin(pin);
+      return User(pseudonym: pseudonym, pin: pin);
     }
-    if (_userPasswords[pseudonym] != password) {
-      throw Exception('Incorrect password');
-    }
-    if (_userPins[pseudonym] != null && _userPins[pseudonym] != pin) {
-      throw Exception('Incorrect PIN');
-    }
-    return User(pseudonym: pseudonym, pin: _userPins[pseudonym]);
+    throw Exception('Login failed: ${resp.body}');
   }
 
+  // Set a 4-digit PIN for quick unlock
   Future<void> setPin(String pin) async {
-    // TODO: Store 4-digit PIN securely for the current user
-    await Future.delayed(Duration(milliseconds: 100));
+    if (pin.length == 4 && int.tryParse(pin) != null) {
+      await _secureStorage.write(key: 'user_pin', value: pin);
+    } else {
+      throw Exception('PIN must be 4 digits');
+    }
   }
+
+  // Validate PIN
+  Future<bool> validatePin(String pin) async {
+    final storedPin = await _secureStorage.read(key: 'user_pin');
+    return storedPin == pin;
+  }
+
+  Future<bool> get hasPin async =>
+      (await _secureStorage.read(key: 'user_pin')) != null;
 
   Future<void> logout() async {
-    // TODO: Clear session and local caches
+    // Clear session and local caches
+    await _secureStorage.deleteAll();
+    // TODO: Add call to LocalStorage.clear() if implemented
     await Future.delayed(Duration(milliseconds: 100));
   }
+
+  // Anonymous signup is handled by signUp (pseudonym + password only)
+  // 4-digit PIN quick unlock is handled by setPin/validatePin
+  // Display warning if pseudonym is already taken is handled in signUp
 }
